@@ -1,27 +1,24 @@
-# Main libraries
-numpy==1.26.4           # Stable version compatible with scikit-learn
+# Core Libraries
+numpy==1.26.4            # Stable version compatible with scikit-learn
 pandas==2.2.2
-seaborn==0.13.2
-spacy==3.8.0
-
-# Transformers and PyTorch
-torch==2.6.0            # Matched with torchvision/torchaudio
-transformers==4.45.2
-torchcrf==1.1.0
-tqdm==4.67.0            # To satisfy dataproc-spark-connect
-
-# Datasets and evaluation metrics
-datasets==3.5.1
-scikit-learn==1.4.1.post1
-
-# Visualization and utilities
-IPython==8.26.0         # Or ==7.34.0 if using google-colab
 matplotlib==3.8.3
+seaborn==0.13.2
 networkx==3.2.1
 
-# Optional: Install these separately if needed
-# torchvision==0.21.0+cu124
-# torchaudio==2.6.0+cu124
+# NLP & ML
+spacy==3.8.0
+scikit-learn==1.4.1.post1
+datasets==3.5.1
 
-# spaCy English language model (small)
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+# Deep Learning
+torch==2.4.1             # Compatible with CUDA 12.x in Colab
+transformers==4.45.2
+torchcrf==1.1.0          # For BERT+CRF models
+
+# Utilities
+tqdm==4.67.0             # Updated to avoid spark-connect conflict
+IPython==8.26.0          # Latest stable – use ==7.34.0 only if needed for Colab legacy compat
+traitlets==5.14.3        # Helps reduce traitlets warnings
+
+# spaCy English model (small)
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl 
