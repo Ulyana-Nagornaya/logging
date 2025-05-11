@@ -1,24 +1,10 @@
-# Core Libraries
-numpy==1.26.4            # Stable version compatible with scikit-learn
-pandas==2.2.2
-matplotlib==3.8.3
-seaborn==0.13.2
-networkx==3.2.1
-
-# NLP & ML
-spacy==3.8.0
-scikit-learn==1.4.1.post1
-datasets==3.5.1
-
-# Deep Learning
-torch==2.4.1             # Compatible with CUDA 12.x in Colab
+# NLP & Deep Learning
+torch==2.4.1 --extra-index-url https://download.pytorch.org/whl/cu124 
 transformers==4.45.2
-torchcrf==1.1.0          # For BERT+CRF models
+spacy==3.8.0
+torchcrf==1.1.0
+datasets==3.5.1
+tokenizers==0.20.3
 
-# Utilities
-tqdm==4.67.0             # Updated to avoid spark-connect conflict
-IPython==8.26.0          # Latest stable – use ==7.34.0 only if needed for Colab legacy compat
-traitlets==5.14.3        # Helps reduce traitlets warnings
-
-# spaCy English model (small)
+# Download spaCy English model
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl 
