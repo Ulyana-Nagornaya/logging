@@ -1,23 +1,27 @@
 # Main libraries
-numpy==1.26.4           # Downgraded for compatibility with scikit-learn
+numpy==1.26.4           # Stable version compatible with scikit-learn
 pandas==2.2.2
 seaborn==0.13.2
 spacy==3.8.0
 
 # Transformers and PyTorch
-torch==2.4.1
+torch==2.6.0            # Matched with torchvision/torchaudio
 transformers==4.45.2
 torchcrf==1.1.0
-tqdm==4.66.5
+tqdm==4.67.0            # To satisfy dataproc-spark-connect
 
 # Datasets and evaluation metrics
 datasets==3.5.1
-scikit-learn==1.4.1.post1  # Requires numpy <2.0
+scikit-learn==1.4.1.post1
 
 # Visualization and utilities
-IPython==8.26.0
+IPython==8.26.0         # Or ==7.34.0 if using google-colab
 matplotlib==3.8.3
 networkx==3.2.1
 
+# Optional: Install these separately if needed
+# torchvision==0.21.0+cu124
+# torchaudio==2.6.0+cu124
+
 # spaCy English language model (small)
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl 
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
