@@ -1,23 +1,23 @@
 # Main libraries
-numpy==2.2.5          # Latest stable version compatible with Python 3.11+
-pandas==2.2.2         # Data manipulation and analysis
-seaborn==0.13.2       # Data visualization
-spacy==3.8.0          # NLP library
+numpy==1.26.4           # Downgraded for compatibility with scikit-learn
+pandas==2.2.2
+seaborn==0.13.2
+spacy==3.8.0
 
 # Transformers and PyTorch
-torch==2.4.1          # PyTorch deep learning framework
-transformers==4.45.2  # Hugging Face Transformers library
-torchcrf==1.1.0       # CRF layer for PyTorch (used in BERT+CRF model)
-tqdm==4.66.5          # Progress bars
+torch==2.4.1
+transformers==4.45.2
+torchcrf==1.1.0
+tqdm==4.66.5
 
 # Datasets and evaluation metrics
-datasets==3.5.1       # Dataset handling and processing
-scikit-learn==1.4.1.post1  # Machine learning tools
+datasets==3.5.1
+scikit-learn==1.4.1.post1  # Requires numpy <2.0
 
 # Visualization and utilities
-IPython==8.26.0       # Interactive shell
-matplotlib==3.8.3     # Plotting and visualization
-networkx==3.2.1       # Network analysis
+IPython==8.26.0
+matplotlib==3.8.3
+networkx==3.2.1
 
 # spaCy English language model (small)
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl 
