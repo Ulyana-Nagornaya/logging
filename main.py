@@ -1,6 +1,7 @@
 import logging
 from utils import load_conll04, prepare_dataframes, get_dataloaders
-from crf_llm import BertCrf, train_model, test_model
+from models.crf_ml import CRFModel
+from models.crf_llm import BertCrfModel
 from sklearn_crfsuite import CRF
 from sklearn.metrics import classification_report, f1_score
 import numpy as np
