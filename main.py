@@ -1,11 +1,11 @@
 # main.py
 
 import logging
-from models.crf_ml import CRFModel
-from models.crf_llm import BertCrfModel
-from utils import load_data, prepare_data
+from crf_llm import BertCrfModel  # Make sure crf_llm.py is in the same directory
+from datasets import load_dataset
 import pandas as pd
 
+# Configure logging
 logging.basicConfig(
     filename='results.log',
     level=logging.INFO,
@@ -31,29 +31,43 @@ def run_experiment(model, model_name, X_train, y_train, X_test, y_test):
     logging.info(f"[{model_name}] Micro-F1 score: {metrics.get('accuracy', 0.0):.4f}")
     return metrics
 
+def load_and_prepare_data():
+    """
+    Load CoNLL04 dataset and prepare tokens and bio_tags
+    """
+    logging.info("Loading CoNLL04 dataset...")
+    dataset = load_dataset("DFKI-SLT/conll04")
+
+    def extract_tokens_and_tags(df):
+        df = df.to_pandas()
+        df = df[['tokens', 'bio_tags']]
+        return df['tokens'].tolist(), df['bio_tags'].tolist()
+
+    train_df = dataset["train"].to_pandas()
+    val_df = dataset["validation"].to_pandas()
+    test_df = dataset["test"].to_pandas()
+
+    # Combine train and validation for final training
+    combined_train_df = pd.concat([train_df, val_df], ignore_index=True)
+
+    X_train, y_train = extract_tokens_and_tags(combined_train_df)
+    X_test, y_test = extract_tokens_and_tags(test_df)
+
+    return X_train, y_train, X_test, y_test
+
+
 def main():
     logging.info("Starting experiments: NER for Knowledge Graph Construction")
 
-    logging.info("Loading CoNLL04 dataset...")
-    df_train, df_test = load_data()
+    # Load and prepare data
+    X_train, y_train, X_test, y_test = load_and_prepare_data()
 
-    logging.info("Preparing data for CRF model...")
-    df_train_crf, X_crf_train, y_crf_train = prepare_data(df_train)
-    df_test_crf, X_crf_test, y_crf_test = prepare_data(df_test)
-
-    logging.info("Initializing CRF model...")
-    crf_model = CRFModel()
-    run_experiment(crf_model, "CRF", X_crf_train, y_crf_train, X_crf_test, y_crf_test)
-
-    logging.info("Preparing data for BERT+CRF model...")
-    X_bert_train = df_train["tokens"].tolist()
-    y_bert_train = df_train["bio_tags"].tolist()
-    X_bert_test = df_test["tokens"].tolist()
-    y_bert_test = df_test["bio_tags"].tolist()
-
-    logging.info("Initializing BERT+CRF model...")
+    # Initialize and run BERT + CRF model
+    logging.info("Initializing BERT + CRF model...")
     bert_crf_model = BertCrfModel()
-    run_experiment(bert_crf_model, "BERT+CRF", X_bert_train, y_bert_train, X_bert_test, y_bert_test)
+
+    run_experiment(bert_crf_model, "BERT+CRF", X_train, y_train, X_test, y_test)
+
 
 if __name__ == "__main__":
     main()
