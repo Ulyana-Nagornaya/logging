@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torchcrf import CRF
-from transformers import AutoModel, AutoTokenizer, AdamW
+from transformers import AutoModel, AutoTokenizer
 from sklearn.metrics import classification_report, f1_score, confusion_matrix
 from tqdm.auto import tqdm
 import numpy as np
