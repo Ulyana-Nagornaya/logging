@@ -2,15 +2,76 @@
 
 import torch
 import torch.nn as nn
-from torch.optim import AdamW
-from tqdm.auto import tqdm
+from torch.utils.data import DataLoader, Dataset
+from torchcrf import CRF
+from transformers import AutoModel, AutoTokenizer, AdamW
 from sklearn.metrics import classification_report, f1_score, confusion_matrix
-import matplotlib.pyplot as plt
-import seaborn as sns
+from tqdm.auto import tqdm
+import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Label mapping
+label2id = {
+    "O": 0,
+    "B-Peop": 1,
+    "I-Peop": 2,
+    "B-Org": 3,
+    "I-Org": 4,
+    "B-Loc": 5,
+    "I-Loc": 6,
+    "B-Other": 7,
+    "I-Other": 8
+}
+id2label = {v: k for k, v in label2id.items()}
+
+# Tokenizer
+tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+# Dataset class
+class NERDataset(Dataset):
+    def __init__(self, df, tokenizer, label2id, max_length=128):
+        self.df = df
+        self.tokenizer = tokenizer
+        self.label2id = label2id
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        tokens = self.df.iloc[idx]["tokens"]
+        bio_tags = self.df.iloc[idx]["bio_tags"]
+
+        encoding = tokenizer(
+            tokens,
+            is_split_into_words=True,
+            truncation=True,
+            padding="max_length",
+            max_length=self.max_length,
+            return_tensors="pt"
+        )
+
+        word_ids = encoding.word_ids()
+        labels = []
+        previous_word_idx = None
+
+        for word_id in word_ids:
+            if word_id is None:
+                labels.append(-100)
+            elif word_id != previous_word_idx:
+                labels.append(label2id[bio_tags[word_id]])
+            else:
+                labels.append(-100)
+            previous_word_idx = word_id
+
+        encoding["labels"] = torch.tensor(labels)
+        return {key: val.squeeze(0) for key, val in encoding.items()}
 
 
+# BERT + CRF Model
 class BertCrf(nn.Module):
-    """BERT + CRF model for Named Entity Recognition."""
     def __init__(self, num_labels, bert_name="bert-base-uncased", dropout=0.4):
         super().__init__()
         self.bert = AutoModel.from_pretrained(bert_name)
@@ -20,170 +81,100 @@ class BertCrf(nn.Module):
 
     def forward(self, input_ids, attention_mask, labels=None):
         outputs = self.bert(input_ids, attention_mask=attention_mask)
-        sequence_output = outputs.last_hidden_state
-        emissions = self.fc(self.dropout(sequence_output))
-
+        emissions = self.fc(self.dropout(outputs[0]))
         if labels is not None:
-            log_likelihood = self.crf(emissions, labels, mask=attention_mask.bool())
-            return -log_likelihood
-        else:
-            return self.crf.decode(emissions, mask=attention_mask.bool())
+            return -self.crf(emissions, labels, mask=attention_mask.bool())
+        return self.crf.decode(emissions, mask=attention_mask.bool())
 
-    def save_to(self, path):
+    def save_model(self, path):
         torch.save(self.state_dict(), path)
 
-    def load_from(self, path):
-        self.load_state_dict(torch.load(path, map_location='cpu'))
+    def load_model(self, path):
+        self.load_state_dict(torch.load(path))
 
 
-def compute_f1(preds, labels):
-    """Compute micro-F1 score across predictions."""
-    preds_flat = [tag for seq in preds for tag in seq]
-    labels_flat = [label for seq in labels for label in seq if label != -100]
-    return f1_score(labels_flat, preds_flat, average='micro')
+# Model wrapper
+class BertCrfModel:
+    def __init__(self, num_labels=len(label2id), epochs=10, batch_size=17):
+        self.num_labels = num_labels
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.model = BertCrf(num_labels=self.num_labels)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
 
+    def train(self, X_train, y_train):
+        logger.info("Preparing training data...")
+        df_train = pd.DataFrame({"tokens": X_train, "bio_tags": y_train})
+        train_dataset = NERDataset(df_train, tokenizer, label2id)
+        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
 
-def evaluate_model(model, val_loader, device):
-    """Evaluate model performance on validation/test set."""
-    model.eval()
-    total_loss = 0
-    all_preds, all_labels = [], []
+        optimizer = AdamW(self.model.parameters(), lr=5e-5)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
+        best_val_loss = float('inf')
+        counter = 0
 
-    with torch.no_grad():
-        for batch in tqdm(val_loader, desc="Validation"):
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
+        for epoch in range(self.epochs):
+            self.model.train()
+            total_loss = 0
+            for batch in train_loader:
+                optimizer.zero_grad()
+                input_ids = batch["input_ids"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
+                labels = batch["labels"].to(self.device)
 
-            loss = model(input_ids, attention_mask, labels)
-            total_loss += loss.item()
+                loss = self.model(input_ids, attention_mask, labels)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
 
-            predictions = model(input_ids, attention_mask)
-            all_preds.extend(predictions)
+            avg_train_loss = total_loss / len(train_loader)
+            logger.info(f"Epoch {epoch + 1}/{self.epochs} - Train Loss: {avg_train_loss:.4f}")
+            scheduler.step()
 
-            active_labels = [
-                [label for label, mask in zip(seq_labels, seq_mask) if mask]
-                for seq_labels, seq_mask in zip(labels.cpu().numpy(), attention_mask.cpu().numpy())
-            ]
-            all_labels.extend(active_labels)
+        logger.info("Training completed.")
 
-    avg_val_loss = total_loss / len(val_loader)
-    return avg_val_loss, all_preds, all_labels
+    def evaluate(self, X_test, y_test):
+        logger.info("Preparing test data...")
+        df_test = pd.DataFrame({"tokens": X_test, "bio_tags": y_test})
+        test_dataset = NERDataset(df_test, tokenizer, label2id)
+        test_loader = DataLoader(test_dataset, batch_size=self.batch_size)
 
+        self.model.eval()
+        true_labels = []
+        pred_labels = []
 
-def visualize_confusion_matrix(true_labels, pred_labels, id2label):
-    """Plot confusion matrix excluding 'O' label."""
-    filtered_true = []
-    filtered_pred = []
+        with torch.no_grad():
+            for batch in tqdm(test_loader, desc="Evaluating"):
+                input_ids = batch["input_ids"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
+                labels = batch["labels"].to(self.device)
 
-    for t, p in zip(true_labels, pred_labels):
-        true_tag = id2label[t]
-        pred_tag = id2label[p]
-        if true_tag != 'O':
-            filtered_true.append(true_tag)
-            filtered_pred.append(pred_tag)
+                predictions = self.model(input_ids, attention_mask)
 
-    labels = sorted(set(filtered_true + filtered_pred) - {'O'})
+                active_labels = [
+                    [label for label, mask in zip(seq_labels, seq_mask) if mask]
+                    for seq_labels, seq_mask in zip(labels.cpu().numpy(), attention_mask.cpu().numpy())
+                ]
+                active_preds = predictions
 
-    cm = confusion_matrix(filtered_true, filtered_pred, labels=labels)
+                for label_seq, pred_seq in zip(active_labels, active_preds):
+                    for l, p in zip(label_seq, pred_seq):
+                        if l != -100:
+                            true_labels.append(id2label[l])
+                            pred_labels.append(id2label[p])
 
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=labels, yticklabels=labels)
-    plt.title('Confusion Matrix')
-    plt.xlabel('Predicted Labels')
-    plt.ylabel('True Labels')
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.show()
+        logger.info("Classification Report:")
+        report = classification_report(true_labels, pred_labels, digits=4, output_dict=True)
+        print(classification_report(true_labels, pred_labels, digits=4))
 
+        micro_f1 = f1_score(true_labels, pred_labels, average='micro')
+        logger.info(f"Micro-F1 score: {micro_f1:.4f}")
 
-def train_model(model, train_loader, val_loader, epochs=10, patience=3, lr=5e-5):
-    """Train model with early stopping."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    optimizer = AdamW(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
-
-    train_losses, val_losses, val_f1_scores = [], [], []
-    best_val_loss = float('inf')
-    counter = 0
-
-    for epoch in range(epochs):
-        model.train()
-        total_loss = 0
-
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}"):
-            optimizer.zero_grad()
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-
-            loss = model(input_ids, attention_mask, labels)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-
-        avg_train_loss = total_loss / len(train_loader)
-        train_losses.append(avg_train_loss)
-
-        val_loss, val_preds, val_labels = evaluate_model(model, val_loader, device)
-        val_f1 = compute_f1(val_preds, val_labels)
-        val_losses.append(val_loss)
-        val_f1_scores.append(val_f1)
-
-        print(f"\nEpoch {epoch+1}/{epochs}")
-        print(f"Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}, Val micro-F1: {val_f1:.4f}")
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            counter = 0
-            model.save_to('model.pt')
-        else:
-            counter += 1
-            if counter >= patience:
-                print("Early stopping triggered.")
-                break
-
-        scheduler.step()
-
-    return train_losses, val_losses, val_f1_scores
-
-
-def test_model(model, test_loader, id2label):
-    """Run final evaluation on test set and show classification report."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.load_from('model.pt')
-    model = model.to(device)
-    model.eval()
-
-    all_preds, all_labels = [], []
-
-    with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Testing"):
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-
-            predictions = model(input_ids, attention_mask)
-            all_preds.extend(predictions)
-
-            active_labels = [
-                [label for label, mask in zip(seq_labels, seq_mask) if mask]
-                for seq_labels, seq_mask in zip(labels.cpu().numpy(), attention_mask.cpu().numpy())
-            ]
-            all_labels.extend(active_labels)
-
-    true_labels = []
-    pred_labels = []
-
-    for labels_seq, preds_seq in zip(all_labels, all_preds):
-        for true_tag_id, pred_tag_id in zip(labels_seq, preds_seq):
-            if true_tag_id != -100:
-                true_labels.append(id2label[true_tag_id])
-                pred_labels.append(id2label[pred_tag_id])
-
-    print(classification_report(true_labels, pred_labels, digits=4))
-    micro_f1 = f1_score(true_labels, pred_labels, average='micro')
-    print(f"Micro-F1: {micro_f1:.4f}")
-
-    visualize_confusion_matrix(true_labels, pred_labels, id2label)
+        return {
+            'precision': report['weighted avg']['precision'],
+            'recall': report['weighted avg']['recall'],
+            'f1-score': report['weighted avg']['f1-score'],
+            'accuracy': micro_f1,
+            'classification_report': report
+        }
