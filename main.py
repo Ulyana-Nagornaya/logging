@@ -63,7 +63,7 @@ def main():
         val_dataset = NERDataset(df_val, tokenizer, label2id)
         val_loader = DataLoader(val_dataset, batch_size=17, shuffle=False)
 
-        train_model(BertCrf_model, train_loader, val_loader, epochs=1, patience=3)
+        train_model(BertCrf_model, train_loader, val_loader, epochs=10, patience=3)
             
         logging.info("[BERT+CRF] Starting evaluation...")
         test_dataset = NERDataset(df_test, tokenizer, label2id)
