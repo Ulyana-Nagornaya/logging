@@ -53,10 +53,8 @@ def main():
         logging.info("[BERT+CRF] Loading dataset...")
         df_train, df_test, df_val = load_data()
         
-        
         logging.info("[BERT+CRF] Preparing data...")
         df_train, df_test, df_val = prepare_data_for_bert(df_train, df_test, df_val)
-        print(df_train, df_test, df_val)
         
         logging.info("[BERT+CRF] Starting training...")
         train_dataset = NERDataset(df_train, tokenizer, label2id)
@@ -74,15 +72,14 @@ def main():
         
         logging.info("[BERT+CRF] Evaluation Results:")
         report = get_classification_report(test_preds, test_labels, id2label)
-        logging.info(report)
-        # for key, value in metrics.items():
-        #     if isinstance(value, dict):
-        #         logging.info(f"  {key}:")
-        #         for k, v in value.items():
-        #             logging.info(f"{k}: {v:.4f}")
-        #     else:
-        #         logging.info(f"{key}: {value:.4f}")
-        # logging.info(f"[BERT+CRF] Micro-F1 score: {metrics.get('accuracy', 0.0):.4f}")
+        for key, value in report.items():
+            if isinstance(value, dict):
+                logging.info(f"{key}:")
+                for k, v in value.items():
+                    logging.info(f"{k}: {v:.4f}")
+            else:
+                logging.info(f"{key}: {value:.4f}")
+        logging.info(f"[BERT+CRF] Micro-F1 score: {report.get('accuracy', 0.0):.4f}")
 
 if __name__ == "__main__":
     main()
