@@ -1,35 +1,53 @@
-# crf_llm.py
-
+import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 from torchcrf import CRF
 from transformers import AutoModel, AutoTokenizer
-from sklearn.metrics import classification_report, f1_score, confusion_matrix
-from tqdm.auto import tqdm
+from sklearn.metrics import classification_report, f1_score
+from datasets import load_dataset
+import matplotlib.pyplot as plt
 import numpy as np
-import logging
+from tqdm.auto import tqdm
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import StepLR
 
-logger = logging.getLogger(__name__)
 
-# Label mapping
-label2id = {
-    "O": 0,
-    "B-Peop": 1,
-    "I-Peop": 2,
-    "B-Org": 3,
-    "I-Org": 4,
-    "B-Loc": 5,
-    "I-Loc": 6,
-    "B-Other": 7,
-    "I-Other": 8
-}
+
+# Label mappings
+label2id = {"O": 0, "B-Peop": 1, "I-Peop": 2, "B-Org": 3, "I-Org": 4, "B-Loc": 5, "I-Loc": 6, "B-Other": 7, "I-Other": 8}
 id2label = {v: k for k, v in label2id.items()}
 
-# Tokenizer
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+def tokenize_and_align_labels(tokens, labels, tokenizer, label2id, max_length=128):
+    tokenized_inputs = tokenizer(
+        tokens,
+        is_split_into_words=True,
+        padding="max_length",
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt"
+    )
+    word_ids = tokenized_inputs.word_ids()  # list of ID of tokens for each subtoken
+    previous_word_idx = None
+    aligned_labels = []
+    for word_id in word_ids:
+        if word_id is None:  # CLS, SEP, or PAD
+            aligned_labels.append(0)  # mask will ignore it
+        else:
+            original_label = labels[word_id]
+            if word_id != previous_word_idx:
+                aligned_labels.append(label2id[original_label])
+                previous_word_idx = word_id
+            else:
+                if original_label.startswith("B-") or original_label.startswith("I-"):
+                    entity_type = original_label[2:]
+                    i_label = f"I-{entity_type}"
+                    aligned_labels.append(label2id[i_label])
+                else:
+                    aligned_labels.append(label2id["O"])
+    tokenized_inputs["labels"] = torch.tensor(aligned_labels)
+    return tokenized_inputs
 
-# Dataset class
 class NERDataset(Dataset):
     def __init__(self, df, tokenizer, label2id, max_length=128):
         self.df = df
@@ -42,37 +60,22 @@ class NERDataset(Dataset):
 
     def __getitem__(self, idx):
         tokens = self.df.iloc[idx]["tokens"]
-        bio_tags = self.df.iloc[idx]["bio_tags"]
-
-        encoding = tokenizer(
+        labels = self.df.iloc[idx]["bio_tags"]
+        tokenized_data = tokenize_and_align_labels(
             tokens,
-            is_split_into_words=True,
-            truncation=True,
-            padding="max_length",
-            max_length=self.max_length,
-            return_tensors="pt"
+            labels,
+            self.tokenizer,
+            self.label2id,
+            self.max_length
         )
+        return {
+            "input_ids": tokenized_data["input_ids"].squeeze(0),
+            "attention_mask": tokenized_data["attention_mask"].squeeze(0),
+            "labels": tokenized_data["labels"]
+        }
 
-        word_ids = encoding.word_ids()
-        labels = []
-        previous_word_idx = None
-
-        for word_id in word_ids:
-            if word_id is None:
-                labels.append(-100)
-            elif word_id != previous_word_idx:
-                labels.append(label2id[bio_tags[word_id]])
-            else:
-                labels.append(-100)
-            previous_word_idx = word_id
-
-        encoding["labels"] = torch.tensor(labels)
-        return {key: val.squeeze(0) for key, val in encoding.items()}
-
-
-# BERT + CRF Model
 class BertCrf(nn.Module):
-    def __init__(self, num_labels, bert_name="bert-base-uncased", dropout=0.4):
+    def __init__(self, num_labels, bert_name, dropout=0.4):
         super().__init__()
         self.bert = AutoModel.from_pretrained(bert_name)
         self.dropout = nn.Dropout(dropout)
@@ -81,100 +84,150 @@ class BertCrf(nn.Module):
 
     def forward(self, input_ids, attention_mask, labels=None):
         outputs = self.bert(input_ids, attention_mask=attention_mask)
-        emissions = self.fc(self.dropout(outputs[0]))
+        sequence_output = outputs[0]
+        emissions = self.fc(self.dropout(sequence_output))
+
         if labels is not None:
-            return -self.crf(emissions, labels, mask=attention_mask.bool())
-        return self.crf.decode(emissions, mask=attention_mask.bool())
+            log_likelihood = self.crf(emissions, labels, mask=attention_mask.bool())
+            return -log_likelihood
+        else:
+            mask = attention_mask.bool()
+            return self.crf.decode(emissions, mask=mask)
 
-    def save_model(self, path):
-        torch.save(self.state_dict(), path)
+    def save_to(self, path):
+        torch.save(self.state_dict(), path, _use_new_zipfile_serialization=True)
 
-    def load_model(self, path):
-        self.load_state_dict(torch.load(path))
+    def load_from(self, path):
+        self.load_state_dict(torch.load(path, map_location='cpu', weights_only=False))
 
 
-# Model wrapper
-class BertCrfModel:
-    def __init__(self, num_labels=len(label2id), epochs=10, batch_size=17):
-        self.num_labels = num_labels
-        self.epochs = epochs
-        self.batch_size = batch_size
-        self.model = BertCrf(num_labels=self.num_labels)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.to(self.device)
+def compute_f1(preds, labels):
+    preds_flat = [tag for seq in preds for tag in seq]
+    labels_flat = [
+        label for seq in labels for label in seq if label != -100  # Ignore -100
+    ]
 
-    def train(self, X_train, y_train):
-        logger.info("Preparing training data...")
-        df_train = pd.DataFrame({"tokens": X_train, "bio_tags": y_train})
-        train_dataset = NERDataset(df_train, tokenizer, label2id)
-        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
+    return f1_score(labels_flat, preds_flat, average='micro')
 
-        optimizer = AdamW(self.model.parameters(), lr=5e-5)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
-        best_val_loss = float('inf')
-        counter = 0
 
-        for epoch in range(self.epochs):
-            self.model.train()
-            total_loss = 0
-            for batch in train_loader:
-                optimizer.zero_grad()
-                input_ids = batch["input_ids"].to(self.device)
-                attention_mask = batch["attention_mask"].to(self.device)
-                labels = batch["labels"].to(self.device)
+def evaluate_model(model, val_loader):
+    model.eval()
+    total_loss = 0
+    all_preds, all_labels = [], []
 
-                loss = self.model(input_ids, attention_mask, labels)
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item()
+    with torch.no_grad():
+        for batch in tqdm(val_loader, desc="Validation"):
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
 
-            avg_train_loss = total_loss / len(train_loader)
-            logger.info(f"Epoch {epoch + 1}/{self.epochs} - Train Loss: {avg_train_loss:.4f}")
-            scheduler.step()
+            # Calculate loss
+            loss = model(input_ids, attention_mask, labels)
+            total_loss += loss.item()
 
-        logger.info("Training completed.")
+            # Get predictions
+            predictions = model(input_ids, attention_mask)
 
-    def evaluate(self, X_test, y_test):
-        logger.info("Preparing test data...")
-        df_test = pd.DataFrame({"tokens": X_test, "bio_tags": y_test})
-        test_dataset = NERDataset(df_test, tokenizer, label2id)
-        test_loader = DataLoader(test_dataset, batch_size=self.batch_size)
+            all_preds.extend(predictions)
 
-        self.model.eval()
-        true_labels = []
-        pred_labels = []
+            # Flatten labels while ignoring -100
+            active_labels = [
+                [label for label, mask in zip(seq_labels, seq_mask) if mask]
+                for seq_labels, seq_mask in zip(labels.cpu().numpy(), attention_mask.cpu().numpy())
+            ]
+            all_labels.extend(active_labels)
 
-        with torch.no_grad():
-            for batch in tqdm(test_loader, desc="Evaluating"):
-                input_ids = batch["input_ids"].to(self.device)
-                attention_mask = batch["attention_mask"].to(self.device)
-                labels = batch["labels"].to(self.device)
+    avg_val_loss = total_loss / len(val_loader)
+    return avg_val_loss, all_preds, all_labels
 
-                predictions = self.model(input_ids, attention_mask)
+def visualize_metrics(train_losses, val_losses, val_f1_scores):
+    epochs = range(1, len(train_losses) + 1)
 
-                active_labels = [
-                    [label for label, mask in zip(seq_labels, seq_mask) if mask]
-                    for seq_labels, seq_mask in zip(labels.cpu().numpy(), attention_mask.cpu().numpy())
-                ]
-                active_preds = predictions
+    plt.figure(figsize=(12, 5))
 
-                for label_seq, pred_seq in zip(active_labels, active_preds):
-                    for l, p in zip(label_seq, pred_seq):
-                        if l != -100:
-                            true_labels.append(id2label[l])
-                            pred_labels.append(id2label[p])
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs, train_losses, label="Train Loss", color="blue")
+    plt.plot(epochs, val_losses, label="Val Loss", color="orange")
+    plt.title("Loss over Epochs")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.legend()
 
-        logger.info("Classification Report:")
-        report = classification_report(true_labels, pred_labels, digits=4, output_dict=True)
-        print(classification_report(true_labels, pred_labels, digits=4))
+    plt.tight_layout()
+    plt.show()
 
-        micro_f1 = f1_score(true_labels, pred_labels, average='micro')
-        logger.info(f"Micro-F1 score: {micro_f1:.4f}")
+def train_model(model, train_loader, val_loader, epochs=10, patience=3):
+    model.train()
 
-        return {
-            'precision': report['weighted avg']['precision'],
-            'recall': report['weighted avg']['recall'],
-            'f1-score': report['weighted avg']['f1-score'],
-            'accuracy': micro_f1,
-            'classification_report': report
-        }
+    train_losses, val_losses, val_f1_scores = [], [], []
+
+    # Early stopping
+    best_val_loss = float('inf')
+    counter = 0
+
+    for epoch in range(epochs):
+        total_loss = 0
+
+        for batch in train_loader:
+            optimizer.zero_grad()
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+
+            loss = model(input_ids, attention_mask, labels)
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+
+        avg_train_loss = total_loss / len(train_loader)
+        train_losses.append(avg_train_loss)
+
+        #  Validation
+        val_loss, val_preds, val_labels = evaluate_model(model, val_loader)
+        val_f1 = compute_f1(val_preds, val_labels)
+        val_losses.append(val_loss)
+        val_f1_scores.append(val_f1)
+
+        print(f"Epoch {epoch + 1}/{epochs}")
+        print(f"Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}, Val micro-F1: {val_f1:.4f}")
+
+        # Early stopping
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            counter = 0
+            model.save_to('model.pt')
+        else:
+            counter += 1
+            if counter >= patience:
+                print("Early stopping triggered.")
+                break
+
+        # updating learning rate
+        scheduler.step()
+
+    visualize_metrics(train_losses, val_losses, val_f1_scores)
+
+def get_classification_report(test_preds, test_labels, id2label):
+    true_labels = []
+    pred_labels = []
+
+    for labels_seq, preds_seq in zip(test_labels, test_preds):
+        for true_tag, pred_tag in zip(labels_seq, preds_seq):
+            if true_tag != -100:
+                true_labels.append(id2label[true_tag])
+                pred_labels.append(id2label[pred_tag])
+
+    report = classification_report(true_labels, pred_labels, output_dict=True)
+    return report
+
+tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+BertCrf_model = BertCrf(num_labels=len(label2id), bert_name="bert-base-uncased").to(device)
+
+optimizer = AdamW(BertCrf_model.parameters(), lr=5e-5)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
+
+
+    
